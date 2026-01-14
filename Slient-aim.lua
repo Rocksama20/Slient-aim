@@ -1,7 +1,14 @@
 -- The Strongest Battlegrounds Silent Aim
 -- By Mr_Rock20
+-- Compatible with Xeno and most executors
 
 print("Loading TSB Silent Aim...")
+
+-- Check for required functions
+if not Drawing then
+    warn("Drawing API not supported on this executor!")
+    return
+end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,22 +17,24 @@ local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
 
 -- Settings
 local Settings = {
     Enabled = false,
     TeamCheck = false,
-    VisibleCheck = false,
-    FOV = 200,
+    VisibleCheck = true,
+    FOV = 150,
     ShowFOV = true,
     FOVColor = Color3.fromRGB(255, 255, 255),
-    TargetPart = "HumanoidRootPart", -- HumanoidRootPart, Head, UpperTorso
+    TargetPart = "HumanoidRootPart",
+    Smoothness = 0.1
 }
 
 -- FOV Circle
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 2
-FOVCircle.NumSides = 100
+FOVCircle.NumSides = 64
 FOVCircle.Radius = Settings.FOV
 FOVCircle.Filled = false
 FOVCircle.Visible = Settings.ShowFOV
@@ -33,53 +42,75 @@ FOVCircle.Color = Settings.FOVColor
 FOVCircle.Transparency = 1
 FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
 
+-- Target Tracer (optional)
+local Tracer = Drawing.new("Line")
+Tracer.Thickness = 2
+Tracer.Color = Color3.fromRGB(255, 0, 0)
+Tracer.Transparency = 1
+Tracer.Visible = false
+
 -- Functions
 local function IsAlive(player)
     if not player or not player.Character then return false end
-    local humanoid = player.Character:FindFirstChild("Humanoid")
-    return humanoid and humanoid.Health > 0
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+    return humanoid and rootPart and humanoid.Health > 0
 end
 
-local function IsVisible(targetPart)
+local function GetCharacter(player)
+    return player.Character
+end
+
+local function GetRootPart(character)
+    return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso")
+end
+
+local function IsVisible(character)
     if not Settings.VisibleCheck then return true end
     
+    local rootPart = GetRootPart(character)
+    if not rootPart then return false end
+    
     local origin = Camera.CFrame.Position
-    local direction = (targetPart.Position - origin).Unit * (targetPart.Position - origin).Magnitude
+    local target = rootPart.Position
+    local direction = (target - origin)
     
-    local raycastParams = RaycastParams.new()
-    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, targetPart.Parent}
-    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local ray = Ray.new(origin, direction)
+    local part, position = Workspace:FindPartOnRayWithIgnoreList(ray, {LocalPlayer.Character, character})
     
-    local rayResult = Workspace:Raycast(origin, direction, raycastParams)
-    
-    return rayResult == nil
+    return part == nil or part:IsDescendantOf(character)
 end
 
-local function GetClosestPlayer()
+local function GetClosestPlayerInFOV()
     local closestPlayer = nil
-    local shortestDistance = Settings.FOV
+    local shortestDistance = math.huge
+    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
     
     for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and IsAlive(player) then
+        if player ~= LocalPlayer then
             -- Team Check
             if Settings.TeamCheck and player.Team == LocalPlayer.Team then
                 continue
             end
             
-            local character = player.Character
-            local targetPart = character:FindFirstChild(Settings.TargetPart)
-            
-            if targetPart then
-                local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-                
-                if onScreen then
-                    local mousePos = UserInputService:GetMouseLocation()
-                    local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+            if IsAlive(player) then
+                local character = GetCharacter(player)
+                if character then
+                    local targetPart = character:FindFirstChild(Settings.TargetPart) or GetRootPart(character)
                     
-                    if distance < shortestDistance then
-                        if IsVisible(targetPart) then
-                            closestPlayer = player
-                            shortestDistance = distance
+                    if targetPart then
+                        local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                        
+                        if onScreen then
+                            local screenPosition = Vector2.new(screenPos.X, screenPos.Y)
+                            local distance = (screenPosition - mousePos).Magnitude
+                            
+                            if distance < Settings.FOV and distance < shortestDistance then
+                                if IsVisible(character) then
+                                    closestPlayer = player
+                                    shortestDistance = distance
+                                end
+                            end
                         end
                     end
                 end
@@ -90,72 +121,98 @@ local function GetClosestPlayer()
     return closestPlayer
 end
 
--- Namecall Hook for Silent Aim
-local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+-- Silent Aim Target
+local CurrentTarget = nil
+
+-- Hook for Xeno compatibility
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+local oldIndex = mt.__index
+
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
     local args = {...}
     local method = getnamecallmethod()
     
-    if Settings.Enabled and method == "FireServer" then
-        local closestPlayer = GetClosestPlayer()
+    if Settings.Enabled and CurrentTarget and CurrentTarget.Character then
+        local targetPart = CurrentTarget.Character:FindFirstChild(Settings.TargetPart)
         
-        if closestPlayer and closestPlayer.Character then
-            local targetPart = closestPlayer.Character:FindFirstChild(Settings.TargetPart)
-            
-            if targetPart then
-                -- Modify arguments to target the closest player
+        if targetPart and (method == "FireServer" or method == "InvokeServer") then
+            -- TSB specific hooks
+            if tostring(self) == "Slam" or tostring(self) == "Combat" or tostring(self):find("Attack") then
                 args[1] = targetPart.Position
-                return oldNamecall(self, unpack(args))
             end
         end
     end
     
-    return oldNamecall(self, ...)
+    return oldNamecall(self, unpack(args))
 end)
+
+setreadonly(mt, true)
 
 -- GUI
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "TSBSilentAim"
-ScreenGui.Parent = game:GetService("CoreGui")
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.ResetOnSpawn = false
+
+-- Try to parent to CoreGui, fallback to PlayerGui
+local success = pcall(function()
+    ScreenGui.Parent = game:GetService("CoreGui")
+end)
+
+if not success then
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
 
 local MainFrame = Instance.new("Frame")
 MainFrame.Parent = ScreenGui
-MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-MainFrame.BackgroundTransparency = 0.1
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+MainFrame.BackgroundTransparency = 0.05
 MainFrame.BorderSizePixel = 0
 MainFrame.Position = UDim2.new(0.05, 0, 0.3, 0)
-MainFrame.Size = UDim2.new(0, 280, 0, 320)
+MainFrame.Size = UDim2.new(0, 300, 0, 360)
 MainFrame.Active = true
 MainFrame.Draggable = true
 
 local MainBorder = Instance.new("UIStroke")
 MainBorder.Parent = MainFrame
-MainBorder.Thickness = 2
+MainBorder.Thickness = 3
 MainBorder.Color = Color3.fromRGB(255, 255, 255)
 MainBorder.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 
 local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 10)
+MainCorner.CornerRadius = UDim.new(0, 12)
 MainCorner.Parent = MainFrame
 
--- Title
+-- Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Parent = MainFrame
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+TitleBar.BorderSizePixel = 0
+TitleBar.Size = UDim2.new(1, 0, 0, 45)
+
+local TitleBarCorner = Instance.new("UICorner")
+TitleBarCorner.CornerRadius = UDim.new(0, 12)
+TitleBarCorner.Parent = TitleBar
+
 local Title = Instance.new("TextLabel")
-Title.Parent = MainFrame
+Title.Parent = TitleBar
 Title.BackgroundTransparency = 1
-Title.Size = UDim2.new(1, 0, 0, 40)
+Title.Position = UDim2.new(0, 15, 0, 0)
+Title.Size = UDim2.new(1, -50, 1, 0)
 Title.Font = Enum.Font.GothamBold
-Title.Text = "TSB Silent Aim"
+Title.Text = "⚡ TSB Silent Aim"
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Left
 
 -- Close Button
 local CloseButton = Instance.new("TextButton")
-CloseButton.Parent = MainFrame
+CloseButton.Parent = TitleBar
 CloseButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
 CloseButton.BorderSizePixel = 0
-CloseButton.Position = UDim2.new(1, -35, 0, 5)
+CloseButton.Position = UDim2.new(1, -38, 0, 8)
 CloseButton.Size = UDim2.new(0, 30, 0, 30)
 CloseButton.Font = Enum.Font.GothamBold
 CloseButton.Text = "X"
@@ -170,17 +227,17 @@ CloseCorner.Parent = CloseButton
 local Content = Instance.new("Frame")
 Content.Parent = MainFrame
 Content.BackgroundTransparency = 1
-Content.Position = UDim2.new(0, 10, 0, 50)
-Content.Size = UDim2.new(1, -20, 1, -60)
+Content.Position = UDim2.new(0, 15, 0, 60)
+Content.Size = UDim2.new(1, -30, 1, -75)
 
 -- Toggle Button
 local ToggleButton = Instance.new("TextButton")
 ToggleButton.Parent = Content
 ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
 ToggleButton.BorderSizePixel = 0
-ToggleButton.Size = UDim2.new(1, 0, 0, 40)
+ToggleButton.Size = UDim2.new(1, 0, 0, 45)
 ToggleButton.Font = Enum.Font.GothamBold
-ToggleButton.Text = "Silent Aim: OFF"
+ToggleButton.Text = "🎯 Silent Aim: OFF"
 ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 ToggleButton.TextSize = 16
 
@@ -188,15 +245,15 @@ local ToggleCorner = Instance.new("UICorner")
 ToggleCorner.CornerRadius = UDim.new(0, 8)
 ToggleCorner.Parent = ToggleButton
 
--- Team Check Toggle
+-- Team Check
 local TeamCheckButton = Instance.new("TextButton")
 TeamCheckButton.Parent = Content
 TeamCheckButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
 TeamCheckButton.BorderSizePixel = 0
-TeamCheckButton.Position = UDim2.new(0, 0, 0, 50)
-TeamCheckButton.Size = UDim2.new(1, 0, 0, 35)
+TeamCheckButton.Position = UDim2.new(0, 0, 0, 55)
+TeamCheckButton.Size = UDim2.new(1, 0, 0, 38)
 TeamCheckButton.Font = Enum.Font.Gotham
-TeamCheckButton.Text = "Team Check: OFF"
+TeamCheckButton.Text = "👥 Team Check: OFF"
 TeamCheckButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 TeamCheckButton.TextSize = 14
 
@@ -204,15 +261,15 @@ local TeamCheckCorner = Instance.new("UICorner")
 TeamCheckCorner.CornerRadius = UDim.new(0, 8)
 TeamCheckCorner.Parent = TeamCheckButton
 
--- Visible Check Toggle
+-- Visible Check
 local VisibleCheckButton = Instance.new("TextButton")
 VisibleCheckButton.Parent = Content
-VisibleCheckButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+VisibleCheckButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
 VisibleCheckButton.BorderSizePixel = 0
-VisibleCheckButton.Position = UDim2.new(0, 0, 0, 95)
-VisibleCheckButton.Size = UDim2.new(1, 0, 0, 35)
+VisibleCheckButton.Position = UDim2.new(0, 0, 0, 103)
+VisibleCheckButton.Size = UDim2.new(1, 0, 0, 38)
 VisibleCheckButton.Font = Enum.Font.Gotham
-VisibleCheckButton.Text = "Visible Check: OFF"
+VisibleCheckButton.Text = "👁️ Visible Check: ON"
 VisibleCheckButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 VisibleCheckButton.TextSize = 14
 
@@ -225,10 +282,10 @@ local FOVToggleButton = Instance.new("TextButton")
 FOVToggleButton.Parent = Content
 FOVToggleButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
 FOVToggleButton.BorderSizePixel = 0
-FOVToggleButton.Position = UDim2.new(0, 0, 0, 140)
-FOVToggleButton.Size = UDim2.new(1, 0, 0, 35)
+FOVToggleButton.Position = UDim2.new(0, 0, 0, 151)
+FOVToggleButton.Size = UDim2.new(1, 0, 0, 38)
 FOVToggleButton.Font = Enum.Font.Gotham
-FOVToggleButton.Text = "Show FOV: ON"
+FOVToggleButton.Text = "⭕ Show FOV: ON"
 FOVToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 FOVToggleButton.TextSize = 14
 
@@ -236,24 +293,25 @@ local FOVToggleCorner = Instance.new("UICorner")
 FOVToggleCorner.CornerRadius = UDim.new(0, 8)
 FOVToggleCorner.Parent = FOVToggleButton
 
--- FOV Slider Label
+-- FOV Label
 local FOVLabel = Instance.new("TextLabel")
 FOVLabel.Parent = Content
 FOVLabel.BackgroundTransparency = 1
-FOVLabel.Position = UDim2.new(0, 0, 0, 185)
-FOVLabel.Size = UDim2.new(1, 0, 0, 20)
-FOVLabel.Font = Enum.Font.Gotham
-FOVLabel.Text = "FOV Size: " .. Settings.FOV
+FOVLabel.Position = UDim2.new(0, 0, 0, 199)
+FOVLabel.Size = UDim2.new(1, 0, 0, 25)
+FOVLabel.Font = Enum.Font.GothamBold
+FOVLabel.Text = "🎯 FOV Size: " .. Settings.FOV
 FOVLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 FOVLabel.TextSize = 14
+FOVLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 -- FOV Slider
 local FOVSlider = Instance.new("TextButton")
 FOVSlider.Parent = Content
 FOVSlider.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
 FOVSlider.BorderSizePixel = 0
-FOVSlider.Position = UDim2.new(0, 0, 0, 210)
-FOVSlider.Size = UDim2.new(1, 0, 0, 30)
+FOVSlider.Position = UDim2.new(0, 0, 0, 229)
+FOVSlider.Size = UDim2.new(1, 0, 0, 32)
 FOVSlider.Text = ""
 
 local FOVSliderCorner = Instance.new("UICorner")
@@ -264,20 +322,31 @@ local FOVSliderFill = Instance.new("Frame")
 FOVSliderFill.Parent = FOVSlider
 FOVSliderFill.BackgroundColor3 = Color3.fromRGB(50, 150, 255)
 FOVSliderFill.BorderSizePixel = 0
-FOVSliderFill.Size = UDim2.new(Settings.FOV / 500, 0, 1, 0)
+FOVSliderFill.Size = UDim2.new(Settings.FOV / 400, 0, 1, 0)
 
 local FOVSliderFillCorner = Instance.new("UICorner")
 FOVSliderFillCorner.CornerRadius = UDim.new(0, 8)
 FOVSliderFillCorner.Parent = FOVSliderFill
 
+-- Credits
+local Credits = Instance.new("TextLabel")
+Credits.Parent = Content
+Credits.BackgroundTransparency = 1
+Credits.Position = UDim2.new(0, 0, 1, -20)
+Credits.Size = UDim2.new(1, 0, 0, 20)
+Credits.Font = Enum.Font.Gotham
+Credits.Text = "By Mr_Rock20"
+Credits.TextColor3 = Color3.fromRGB(150, 150, 150)
+Credits.TextSize = 12
+
 -- Button Events
 ToggleButton.MouseButton1Click:Connect(function()
     Settings.Enabled = not Settings.Enabled
     if Settings.Enabled then
-        ToggleButton.Text = "Silent Aim: ON"
+        ToggleButton.Text = "🎯 Silent Aim: ON"
         ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
     else
-        ToggleButton.Text = "Silent Aim: OFF"
+        ToggleButton.Text = "🎯 Silent Aim: OFF"
         ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
     end
 end)
@@ -285,10 +354,10 @@ end)
 TeamCheckButton.MouseButton1Click:Connect(function()
     Settings.TeamCheck = not Settings.TeamCheck
     if Settings.TeamCheck then
-        TeamCheckButton.Text = "Team Check: ON"
+        TeamCheckButton.Text = "👥 Team Check: ON"
         TeamCheckButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
     else
-        TeamCheckButton.Text = "Team Check: OFF"
+        TeamCheckButton.Text = "👥 Team Check: OFF"
         TeamCheckButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
     end
 end)
@@ -296,10 +365,10 @@ end)
 VisibleCheckButton.MouseButton1Click:Connect(function()
     Settings.VisibleCheck = not Settings.VisibleCheck
     if Settings.VisibleCheck then
-        VisibleCheckButton.Text = "Visible Check: ON"
+        VisibleCheckButton.Text = "👁️ Visible Check: ON"
         VisibleCheckButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
     else
-        VisibleCheckButton.Text = "Visible Check: OFF"
+        VisibleCheckButton.Text = "👁️ Visible Check: OFF"
         VisibleCheckButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
     end
 end)
@@ -308,10 +377,10 @@ FOVToggleButton.MouseButton1Click:Connect(function()
     Settings.ShowFOV = not Settings.ShowFOV
     FOVCircle.Visible = Settings.ShowFOV
     if Settings.ShowFOV then
-        FOVToggleButton.Text = "Show FOV: ON"
+        FOVToggleButton.Text = "⭕ Show FOV: ON"
         FOVToggleButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
     else
-        FOVToggleButton.Text = "Show FOV: OFF"
+        FOVToggleButton.Text = "⭕ Show FOV: OFF"
         FOVToggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
     end
 end)
@@ -319,9 +388,10 @@ end)
 CloseButton.MouseButton1Click:Connect(function()
     ScreenGui:Destroy()
     FOVCircle:Remove()
+    Tracer:Remove()
 end)
 
--- FOV Slider Logic
+-- FOV Slider
 local dragging = false
 FOVSlider.MouseButton1Down:Connect(function()
     dragging = true
@@ -333,7 +403,13 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
+-- Main Loop
 RunService.RenderStepped:Connect(function()
+    -- Update FOV Circle
+    FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    FOVCircle.Radius = Settings.FOV
+    
+    -- Handle FOV Slider
     if dragging then
         local mousePos = UserInputService:GetMouseLocation()
         local sliderPos = FOVSlider.AbsolutePosition
@@ -342,15 +418,32 @@ RunService.RenderStepped:Connect(function()
         local relativePos = math.clamp(mousePos.X - sliderPos.X, 0, sliderSize.X)
         local percentage = relativePos / sliderSize.X
         
-        Settings.FOV = math.floor(percentage * 500)
-        FOVLabel.Text = "FOV Size: " .. Settings.FOV
+        Settings.FOV = math.floor(percentage * 400)
+        FOVLabel.Text = "🎯 FOV Size: " .. Settings.FOV
         FOVSliderFill.Size = UDim2.new(percentage, 0, 1, 0)
-        FOVCircle.Radius = Settings.FOV
     end
     
-    -- Update FOV Circle Position
-    FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    -- Update Target
+    if Settings.Enabled then
+        CurrentTarget = GetClosestPlayerInFOV()
+    else
+        CurrentTarget = nil
+    end
 end)
 
+-- Rainbow Border
+spawn(function()
+    while wait() do
+        for i = 0, 1, 0.01 do
+            MainBorder.Color = Color3.fromHSV(i, 1, 1)
+            wait(0.05)
+        end
+    end
+end)
+
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 print("✅ TSB Silent Aim Loaded!")
-print("Toggle with the GUI")
+print("👨‍💻 By Mr_Rock20")
+print("🎮 Executor: Xeno Compatible")
+print("🎯 Game: The Strongest Battlegrounds")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
